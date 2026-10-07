@@ -66,21 +66,61 @@ function buildClient(options: AutoStoreClientOptions) {
   });
 }
 
+/**
+ * Error thrown for any failed AutoStore request. Carries only the HTTP status
+ * and AutoStore's own error message — never the axios config, which holds the
+ * API key header and the webhookSecret from the request body.
+ */
+export class AutoStoreError extends Error {
+  constructor(
+    message: string,
+    readonly status?: number,
+    readonly responseBody?: string,
+  ) {
+    super(message);
+    this.name = 'AutoStoreError';
+  }
+}
+
+function describeBody(data: unknown): string | undefined {
+  if (data == null || data === '') return undefined;
+  if (typeof data === 'string') return data.slice(0, 500);
+  const d = data as { message?: unknown; error?: unknown; errors?: unknown };
+  const msg = d.message ?? d.error;
+  if (typeof msg === 'string') {
+    return d.errors ? `${msg} ${JSON.stringify(d.errors).slice(0, 400)}` : msg;
+  }
+  return JSON.stringify(data).slice(0, 500);
+}
+
+function toAutoStoreError(err: unknown): AutoStoreError {
+  if (err instanceof AutoStoreError) return err;
+  if (err instanceof AxiosError) {
+    if (err.response) {
+      const body = describeBody(err.response.data);
+      return new AutoStoreError(
+        `AutoStore membalas ${err.response.status}${body ? `: ${body}` : ''}`,
+        err.response.status,
+        body,
+      );
+    }
+    return new AutoStoreError(`Tidak bisa menghubungi AutoStore (${err.code ?? err.message})`);
+  }
+  return new AutoStoreError(err instanceof Error ? err.message : String(err));
+}
+
 async function withRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
-  let lastError: Error | undefined;
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+  for (let attempt = 1; ; attempt++) {
     try {
       return await fn();
     } catch (err) {
-      lastError = err as Error;
       const isNetworkError = err instanceof AxiosError && !err.response;
-      if (!isNetworkError || attempt === maxRetries) throw err;
+      if (!isNetworkError || attempt >= maxRetries) throw toAutoStoreError(err);
       const delay = attempt * 1500;
       logger.warn({ attempt, delay }, 'AutoStore request failed, retrying...');
       await new Promise((r) => setTimeout(r, delay));
     }
   }
-  throw lastError;
 }
 
 export async function fetchProducts(options: AutoStoreClientOptions): Promise<AutoStoreProduct[]> {
