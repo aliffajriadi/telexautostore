@@ -1,0 +1,47 @@
+{
+  "name": "telexautostore",
+  "version": "1.0.0",
+  "description": "Web panel multi-user untuk bot Telegram terintegrasi AutoStore",
+  "scripts": {
+    "dev": "tsx watch src/server.ts",
+    "build": "tsc --project tsconfig.json",
+    "start": "node dist/server.js",
+    "seed:admin": "tsx prisma/seed-admin.ts",
+    "bots:resync": "tsx scripts/bots-resync.ts",
+    "db:migrate": "prisma migrate dev",
+    "db:push": "prisma db push",
+    "db:generate": "prisma generate",
+    "client:dev": "cd client && pnpm dev",
+    "client:build": "cd client && pnpm build",
+    "test": "tsx --test tests/*.test.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "argon2": "^0.45.1",
+    "axios": "^1.20.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dotenv": "^16.5.0",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.7.0",
+    "grammy": "^1.46.0",
+    "node-cron": "^4.6.0",
+    "pino": "^10.4.0",
+    "pino-pretty": "^13.0.0",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.8",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.4",
+    "@types/node-cron": "^3.0.11",
+    "prisma": "5.22.0",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}

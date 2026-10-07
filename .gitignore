@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Build output (backend + frontend build ke dist/)
+dist/
+*.tsbuildinfo
+
+# Environment — berisi secret; .env.example tetap di-commit
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+logs/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

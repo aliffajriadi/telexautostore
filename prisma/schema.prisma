@@ -1,0 +1,140 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+enum Role {
+  USER
+  ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  BLACKLISTED
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID_MANUAL_PENDING
+  PAID
+  DELIVERED
+  EXPIRED
+  FAILED
+  CANCELLED
+}
+
+model User {
+  id              Int        @id @default(autoincrement())
+  username        String     @unique @db.VarChar(32)
+  email           String     @unique @db.VarChar(191)
+  passwordHash    String
+  role            Role       @default(USER)
+  status          UserStatus @default(ACTIVE)
+  blacklistReason String?
+  lastLoginAt     DateTime?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+  integration     Integration?
+  sessions        Session[]
+}
+
+model Session {
+  id        String   @id
+  userId    Int
+  expiresAt DateTime
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+model Integration {
+  id               Int      @id @default(autoincrement())
+  userId           Int      @unique
+  botKey           String   @unique @db.VarChar(64)
+  botTokenEnc      String   @db.Text
+  botUsername      String?
+  telegramSecret   String   @db.VarChar(64)
+  autostoreUrl     String   @db.VarChar(255)
+  apiKeyEnc        String   @db.Text
+  callbackKey      String   @unique @db.VarChar(64)
+  webhookSecretEnc String   @db.Text
+  botActive        Boolean  @default(false)
+  startImageUrl    String?  @db.Text
+  startMessage     String?  @db.Text
+  lastCallbackAt   DateTime?
+  lastError        String?  @db.Text
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  user             User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  orders           Order[]
+  events           IntegrationEvent[]
+}
+
+model Buyer {
+  id            Int      @id @default(autoincrement())
+  integrationId Int
+  telegramId    BigInt
+  username      String?
+  firstName     String?
+  createdAt     DateTime @default(now())
+  orders        Order[]
+
+  @@unique([integrationId, telegramId])
+}
+
+model Order {
+  id                Int         @id @default(autoincrement())
+  integrationId     Int
+  buyerId           Int
+  externalReference String      @unique @db.VarChar(64)
+  invoiceCode       String?     @unique @db.VarChar(64)
+  orderCode         String?     @db.VarChar(64)
+  productId         Int
+  productName       String      @db.VarChar(191)
+  qty               Int
+  amount            Int
+  status            OrderStatus @default(PENDING_PAYMENT)
+  deliveredItems    Json?
+  expiresAt         DateTime?
+  paidAt            DateTime?
+  deliveredAt       DateTime?
+  createdAt         DateTime    @default(now())
+  updatedAt         DateTime    @updatedAt
+  integration       Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+  buyer             Buyer       @relation(fields: [buyerId], references: [id])
+
+  @@index([integrationId, status])
+  @@index([buyerId])
+}
+
+model IntegrationEvent {
+  id            Int         @id @default(autoincrement())
+  integrationId Int
+  type          String      @db.VarChar(64)
+  message       String      @db.Text
+  createdAt     DateTime    @default(now())
+  integration   Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)
+
+  @@index([integrationId, createdAt])
+}
+
+model AdminAuditLog {
+  id           Int      @id @default(autoincrement())
+  adminId      Int
+  targetUserId Int
+  action       String   @db.VarChar(64)
+  reason       String?  @db.Text
+  createdAt    DateTime @default(now())
+}
+
+model Setting {
+  key   String @id @db.VarChar(64)
+  value String @db.Text
+}
