@@ -14,9 +14,11 @@ export interface AutoStoreProduct {
   stockCount: number;
 }
 
-// TODO: Update these types once you get a real response example from AutoStore
+// Shape of `data` in a 201 response, confirmed against a real AutoStore invoice
 export interface AutoStoreQrisOrderResponse {
   invoiceCode: string;
+  externalReference?: string;
+  status?: string; // "WAITING_PAYMENT" for a fresh invoice
   qrImageUrl?: string; // URL to QR image
   paymentUrl?: string; // URL to payment page
   paymentNumber?: string; // Raw QRIS string
@@ -127,8 +129,11 @@ export async function fetchProducts(options: AutoStoreClientOptions): Promise<Au
   const client = buildClient(options);
   const response = await withRetry(() => client.get<{ success: boolean; products: AutoStoreProduct[] }>('/api/v1/integration/products'));
   const all = response.data.products || [];
-  // Only show products with rupiah currency mode
-  return all.filter((p) => p.currencyMode?.toLowerCase().includes('rupiah') || p.priceRupiah > 0);
+  // Only products payable in rupiah. AutoStore uses currencyMode "both", "rp_only" or "wl_only".
+  return all.filter((p) => {
+    const mode = p.currencyMode?.toLowerCase() ?? '';
+    return mode !== 'wl_only' && (mode === 'both' || mode.startsWith('rp')) && p.priceRupiah > 0;
+  });
 }
 
 export async function createQrisOrder(

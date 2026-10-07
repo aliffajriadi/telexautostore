@@ -4,13 +4,19 @@ import type { Integration } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { createHash } from 'node:crypto';
 import { decrypt, generateToken } from '../../lib/crypto.js';
-import { fetchProducts, createQrisOrder } from '../autostore/autostore-client.js';
+import { fetchProducts, createQrisOrder, AutoStoreError } from '../autostore/autostore-client.js';
 import { logger } from '../../lib/logger.js';
 import { env } from '../../config/env.js';
 import type { AutoStoreProduct } from '../autostore/autostore-client.js';
 
 const MAX_PENDING_ORDERS = 3;
 const PENDING_EXPIRY_MINUTES = 30;
+// AutoStore rejects QRIS invoices below this total ("Total harga QRIS minimal Rp 500.")
+const QRIS_MIN_AMOUNT = 500;
+
+function minQtyFor(product: AutoStoreProduct): number {
+  return Math.max(1, Math.ceil(QRIS_MIN_AMOUNT / product.priceRupiah));
+}
 const CATALOG_CACHE = new Map<number, { products: AutoStoreProduct[]; fetchedAt: number }>();
 const CATALOG_TTL_MS = 45_000; // 45 seconds
 function escapeMd(text: string | number): string {
@@ -302,11 +308,12 @@ export function setupBotHandlers(bot: Bot, initialIntegration: Integration): voi
 
   async function renderQtyPicker(ctx: Context, product: AutoStoreProduct, currentQty: number) {
     const maxQty = product.stockCount;
-    const qty = Math.max(1, Math.min(currentQty, maxQty));
+    const minQty = minQtyFor(product);
+    const qty = Math.max(minQty, Math.min(currentQty, maxQty));
     const total = product.priceRupiah * qty;
 
-    const minus5 = Math.max(1, qty - 5);
-    const minus1 = Math.max(1, qty - 1);
+    const minus5 = Math.max(minQty, qty - 5);
+    const minus1 = Math.max(minQty, qty - 1);
     const plus1 = Math.min(maxQty, qty + 1);
     const plus5 = Math.min(maxQty, qty + 5);
 
@@ -324,7 +331,10 @@ export function setupBotHandlers(bot: Bot, initialIntegration: Integration): voi
       keyboard.text('🔙 Kembali', `back_katalog`).row();
     }
 
-    const text = `📦 *${escapeMd(product.name)}*\n\nHarga: ${escapeMd(formatRupiah(product.priceRupiah))}\nStok: ${product.stockCount}\n\n🛒 *Jumlah Pembelian: ${qty}*\n💰 *Total Harga: ${escapeMd(formatRupiah(total))}*`;
+    let text = `📦 *${escapeMd(product.name)}*\n\nHarga: ${escapeMd(formatRupiah(product.priceRupiah))}\nStok: ${product.stockCount}\n\n🛒 *Jumlah Pembelian: ${qty}*\n💰 *Total Harga: ${escapeMd(formatRupiah(total))}*`;
+    if (minQty > 1) {
+      text += `\n\nℹ️ _Minimal pembelian ${minQty} item \\(total pembayaran QRIS minimal ${escapeMd(formatRupiah(QRIS_MIN_AMOUNT))}\\)\\._`;
+    }
     
     // We can use editMessageText because it was called from an inline keyboard callback
     await ctx.editMessageText(text, { parse_mode: 'MarkdownV2', reply_markup: keyboard });
@@ -332,18 +342,25 @@ export function setupBotHandlers(bot: Bot, initialIntegration: Integration): voi
 
   // Callback: product selected
   bot.callbackQuery(/^select_product:(\d+)$/, async (ctx) => {
-    await ctx.answerCallbackQuery();
     const productId = parseInt(ctx.match[1]);
     const products = await getCachedProducts(integration);
     const product = products.find((p) => p.id === productId);
 
     if (!product || product.stockCount <= 0) {
-      await ctx.answerCallbackQuery('😕 Produk tidak tersedia atau stok habis.');
+      await ctx.answerCallbackQuery({ text: '😕 Produk tidak tersedia atau stok habis.', show_alert: true });
       return;
     }
+    if (product.stockCount < minQtyFor(product)) {
+      await ctx.answerCallbackQuery({
+        text: `😕 Stok tidak cukup untuk pembelian minimal ${minQtyFor(product)} item (total minimal ${formatRupiah(QRIS_MIN_AMOUNT)}).`,
+        show_alert: true,
+      });
+      return;
+    }
+    await ctx.answerCallbackQuery();
 
     try {
-      await renderQtyPicker(ctx, product, 1);
+      await renderQtyPicker(ctx, product, minQtyFor(product));
     } catch (err) {
       logger.error({ err }, 'Error rendering qty picker');
     }
@@ -405,6 +422,10 @@ export function setupBotHandlers(bot: Bot, initialIntegration: Integration): voi
         await ctx.editMessageText('😕 Stok tidak mencukupi. Silakan kembali dan pilih jumlah lebih kecil.');
         return;
       }
+      if (product.priceRupiah * qty < QRIS_MIN_AMOUNT) {
+        await ctx.editMessageText(`😕 Total pembayaran QRIS minimal ${formatRupiah(QRIS_MIN_AMOUNT)}. Silakan tambah jumlah pembelian.`);
+        return;
+      }
 
       const amount = product.priceRupiah * qty;
       const expiresAt = new Date(Date.now() + PENDING_EXPIRY_MINUTES * 60 * 1000);
@@ -424,8 +445,11 @@ export function setupBotHandlers(bot: Bot, initialIntegration: Integration): voi
         },
       });
 
-      // Update externalReference now that we have the order ID
-      const externalReference = `tg-${order.id}`;
+      // AutoStore dedups invoices by externalReference (per API key) and returns the
+      // existing invoice for a repeated value. Order ids alone repeat across databases
+      // (dev vs production, resets), so add a random suffix to keep it globally unique.
+      // The same value is reused for retries inside createQrisOrder.
+      const externalReference = `tg-${order.id}-${generateToken(6)}`;
       await prisma.order.update({ where: { id: order.id }, data: { externalReference } });
 
       const callbackUrl = `${env.APP_URL}/webhook/autostore/${integration.callbackKey}`;
@@ -437,6 +461,10 @@ export function setupBotHandlers(bot: Bot, initialIntegration: Integration): voi
           { baseUrl: integration.autostoreUrl, apiKey },
           { productId, qty, externalReference, webhookUrl: callbackUrl, webhookSecret },
         );
+        // Guard against AutoStore handing back an old invoice (already paid/expired)
+        if (qrisResp.status && qrisResp.status !== 'WAITING_PAYMENT') {
+          throw new AutoStoreError(`AutoStore mengembalikan invoice lama berstatus ${qrisResp.status} (${qrisResp.invoiceCode}).`);
+        }
       } catch (err) {
         // Don't leave it PENDING_PAYMENT: it would count toward the buyer's pending limit.
         // A late order.paid callback can still move a FAILED order to PAID.
@@ -484,7 +512,12 @@ export function setupBotHandlers(bot: Bot, initialIntegration: Integration): voi
       }
     } catch (err) {
       logger.error({ err, integrationId: integration.id }, 'Error creating QRIS order');
-      await ctx.editMessageText('⚠️ Gagal membuat invoice. Silakan coba lagi dalam beberapa saat.');
+      // AutoStore's 4xx messages are buyer-facing business rules (e.g. minimum amount), safe to show
+      const reason =
+        err instanceof AutoStoreError && err.status && err.status < 500 && err.responseBody
+          ? `\n\nAlasan: ${err.responseBody}`
+          : '';
+      await ctx.editMessageText(`⚠️ Gagal membuat invoice.${reason}\n\nSilakan coba lagi dalam beberapa saat.`);
     }
   });
 
