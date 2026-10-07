@@ -4,7 +4,7 @@
   "description": "Web panel multi-user untuk bot Telegram terintegrasi AutoStore",
   "scripts": {
     "dev": "tsx watch src/server.ts",
-    "build": "tsc --project tsconfig.json",
+    "build": "prisma generate && tsc --project tsconfig.json",
     "start": "node dist/server.js",
     "seed:admin": "tsx prisma/seed-admin.ts",
     "bots:resync": "tsx scripts/bots-resync.ts",
