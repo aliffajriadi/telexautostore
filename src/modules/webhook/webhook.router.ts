@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
 import { verifyStoreSignature, decrypt } from '../../lib/crypto.js';
 import { logger } from '../../lib/logger.js';
-import { deliverOrder, notifyManualPending } from '../orders/delivery.service.js';
+import { closeInvoiceMessage, deliverOrder, notifyManualPending } from '../orders/delivery.service.js';
 
 export const webhookRouter: Router = ExpressRouter();
 
@@ -115,8 +115,13 @@ webhookRouter.post('/:callbackKey', async (req: Request, res: Response) => {
 
       // 6. Deliver in background (with retry inside)
       const paidOrder = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-      setImmediate(() => {
-        deliverOrder(integration, paidOrder).catch((err) => orderLog.error({ err }, 'Unexpected delivery error'));
+      setImmediate(async () => {
+        try {
+          await closeInvoiceMessage(integration, paidOrder, 'paid');
+          await deliverOrder(integration, paidOrder);
+        } catch (err) {
+          orderLog.error({ err }, 'Unexpected delivery error');
+        }
       });
       return;
     }
@@ -138,8 +143,13 @@ webhookRouter.post('/:callbackKey', async (req: Request, res: Response) => {
       orderLog.info('[WEBHOOK] Order paid, awaiting manual processing');
 
       const pendingOrder = await prisma.order.findUniqueOrThrow({ where: { id: order.id } });
-      setImmediate(() => {
-        notifyManualPending(integration, pendingOrder).catch((err) => orderLog.error({ err }, 'Unexpected notify error'));
+      setImmediate(async () => {
+        try {
+          await closeInvoiceMessage(integration, pendingOrder, 'paid');
+          await notifyManualPending(integration, pendingOrder);
+        } catch (err) {
+          orderLog.error({ err }, 'Unexpected notify error');
+        }
       });
       return;
     }

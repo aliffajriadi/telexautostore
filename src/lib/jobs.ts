@@ -1,27 +1,42 @@
 import cron from 'node-cron';
 import { prisma } from '../lib/prisma.js';
 import { logger } from '../lib/logger.js';
-import { deliverOrder } from '../modules/orders/delivery.service.js';
+import { closeInvoiceMessage, deliverOrder } from '../modules/orders/delivery.service.js';
 
 /**
- * Job: expire PENDING_PAYMENT orders that have passed their expiresAt time.
- * Runs every 5 minutes.
+ * Job: expire PENDING_PAYMENT orders that have passed their expiresAt time,
+ * then remove the buyer's QR message and tell them not to pay it.
+ * Runs every minute so the QR disappears soon after expiry.
  */
 export function startOrderExpiryJob(): void {
-  cron.schedule('*/5 * * * *', async () => {
+  let running = false;
+  cron.schedule('* * * * *', async () => {
+    if (running) return;
+    running = true;
     try {
-      const result = await prisma.order.updateMany({
-        where: {
-          status: 'PENDING_PAYMENT',
-          expiresAt: { lte: new Date() },
-        },
-        data: { status: 'EXPIRED' },
+      const due = await prisma.order.findMany({
+        where: { status: 'PENDING_PAYMENT', expiresAt: { lte: new Date() } },
+        include: { integration: true },
+        take: 200,
       });
-      if (result.count > 0) {
-        logger.info({ count: result.count }, 'Expired pending orders');
+      let expired = 0;
+      for (const { integration, ...order } of due) {
+        // Claim atomically: a payment callback may have arrived in the meantime
+        const claimed = await prisma.order.updateMany({
+          where: { id: order.id, status: 'PENDING_PAYMENT' },
+          data: { status: 'EXPIRED' },
+        });
+        if (claimed.count === 0) continue;
+        expired++;
+        await closeInvoiceMessage(integration, order, 'expired');
+      }
+      if (expired > 0) {
+        logger.info({ count: expired }, 'Expired pending orders');
       }
     } catch (err) {
       logger.error({ err }, 'Error in order expiry job');
+    } finally {
+      running = false;
     }
   });
 

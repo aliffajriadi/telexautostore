@@ -39,6 +39,7 @@ export async function createOrUpdateIntegration(
     apiKey?: string;
     startMessage?: string;
     startImageUrl?: string;
+    deliveryMessage?: string;
   },
   existingIntegration?: Integration | null,
 ): Promise<Integration> {
@@ -64,6 +65,10 @@ export async function createOrUpdateIntegration(
 
   if (data.startImageUrl !== undefined) {
     updateData.startImageUrl = data.startImageUrl || null;
+  }
+
+  if (data.deliveryMessage !== undefined) {
+    updateData.deliveryMessage = data.deliveryMessage.trim() || null;
   }
 
   if (existingIntegration) {
@@ -118,6 +123,7 @@ export async function createOrUpdateIntegration(
       botActive: false,
       startImageUrl: data.startImageUrl || null,
       startMessage: data.startMessage || null,
+      deliveryMessage: data.deliveryMessage?.trim() || null,
     },
   });
 }

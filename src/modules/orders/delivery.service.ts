@@ -1,4 +1,4 @@
-import { Api, InputFile } from 'grammy';
+import { Api, InputFile, InlineKeyboard } from 'grammy';
 import type { Integration, Order } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { decrypt } from '../../lib/crypto.js';
@@ -38,11 +38,103 @@ function formatItems(items: unknown): string {
   return JSON.stringify(items, null, 2);
 }
 
+function formatRupiah(amount: number): string {
+  return new Intl.NumberFormat('id-ID', { style: 'currency', currency: 'IDR', maximumFractionDigits: 0 }).format(amount);
+}
+
 async function recordEvent(integrationId: number, type: string, message: string): Promise<void> {
   await prisma.integrationEvent
     .create({ data: { integrationId, type, message } })
     .catch((err) => logger.error({ err, integrationId }, 'Failed to record integration event'));
 }
+
+// ─── Delivery message template ────────────────────────────────────────────────
+
+export const DELIVERY_PLACEHOLDERS = ['{name}', '{product}', '{qty}', '{total}', '{invoice}'] as const;
+
+export const DEFAULT_DELIVERY_MESSAGE =
+  '✅ Pembayaran diterima!\n\n' +
+  'Pesanan {product} x{qty} (invoice {invoice}) sudah selesai diproses. ' +
+  'Silakan unduh file pesanan kamu di bawah ini.\n\n' +
+  'Terima kasih sudah berbelanja!';
+
+// Telegram caps document captions at 1024 characters
+const CAPTION_LIMIT = 1024;
+
+/** Fills the merchant's delivery template. Output is plain text (no parse mode). */
+export function renderDeliveryMessage(
+  template: string | null | undefined,
+  vars: { name: string; product: string; qty: number; total: number; invoice: string },
+): string {
+  const text = (template?.trim() || DEFAULT_DELIVERY_MESSAGE)
+    .replace(/{name}/g, vars.name)
+    .replace(/{product}/g, vars.product)
+    .replace(/{qty}/g, String(vars.qty))
+    .replace(/{total}/g, formatRupiah(vars.total))
+    .replace(/{invoice}/g, vars.invoice);
+  return text.length > CAPTION_LIMIT ? `${text.slice(0, CAPTION_LIMIT - 1)}…` : text;
+}
+
+// ─── Invoice message lifecycle ────────────────────────────────────────────────
+
+export type InvoiceCloseReason = 'paid' | 'expired' | 'cancelled';
+
+export function invoiceClosedNotice(reason: InvoiceCloseReason, invoiceCode: string): string {
+  switch (reason) {
+    case 'expired':
+      return `⏰ Invoice ${invoiceCode} sudah kedaluwarsa.\n\nQR pembayaran sudah tidak berlaku, JANGAN lakukan pembayaran. Silakan buat pesanan baru lewat /katalog.`;
+    case 'cancelled':
+      return `❌ Pembayaran dibatalkan.\n\nInvoice ${invoiceCode} sudah tidak berlaku, JANGAN lakukan pembayaran untuk QR tersebut.`;
+    case 'paid':
+      return `✅ Invoice ${invoiceCode} sudah lunas. QR pembayaran sudah tidak berlaku, jangan dibayar lagi.`;
+  }
+}
+
+/**
+ * Removes the QR message for a closed invoice so the buyer can't pay it again.
+ * Falls back to stripping its buttons when Telegram refuses the delete
+ * (e.g. message older than 48 hours). Returns true if the QR message is gone.
+ */
+async function removeInvoiceMessage(api: Api, order: Order): Promise<boolean> {
+  if (!order.invoiceChatId || !order.invoiceMessageId) return false;
+  const chatId = Number(order.invoiceChatId);
+  try {
+    await api.deleteMessage(chatId, order.invoiceMessageId);
+    return true;
+  } catch {
+    await api.editMessageReplyMarkup(chatId, order.invoiceMessageId).catch(() => {});
+    return false;
+  }
+}
+
+/**
+ * Closes the buyer's invoice message: deletes the QR and, for expired or
+ * cancelled invoices, sends a notice telling the buyer not to pay.
+ * Paid invoices get no separate notice — the delivery message follows.
+ */
+export async function closeInvoiceMessage(
+  integration: Integration,
+  order: Order,
+  reason: InvoiceCloseReason,
+): Promise<void> {
+  if (!order.invoiceChatId || !order.invoiceMessageId) return;
+  try {
+    const api = apiFor(integration);
+    const removed = await removeInvoiceMessage(api, order);
+    if (reason === 'paid' && removed) return;
+
+    const code = order.invoiceCode ?? order.externalReference;
+    await withTelegramRetry(() =>
+      api.sendMessage(Number(order.invoiceChatId), invoiceClosedNotice(reason, code), {
+        reply_markup: reason === 'paid' ? undefined : new InlineKeyboard().text('🛍️ Belanja Lagi', 'shop_again'),
+      }),
+    );
+  } catch (err) {
+    logger.warn({ err, orderId: order.id, integrationId: integration.id, reason }, 'Failed to close invoice message');
+  }
+}
+
+// ─── Delivery ─────────────────────────────────────────────────────────────────
 
 /**
  * Sends the order's deliveredItems to the buyer and marks it DELIVERED.
@@ -56,16 +148,21 @@ export async function deliverOrder(integration: Integration, order: Order): Prom
     return false;
   }
 
-  const fileName = `Pesanan_${order.invoiceCode ?? order.externalReference}.txt`;
+  const invoice = order.invoiceCode ?? order.externalReference;
+  const fileName = `Pesanan_${invoice}.txt`;
   const buffer = Buffer.from(formatItems(order.deliveredItems), 'utf-8');
+  const caption = renderDeliveryMessage(integration.deliveryMessage, {
+    name: buyer.firstName ?? buyer.username ?? 'Kak',
+    product: order.productName,
+    qty: order.qty,
+    total: order.amount,
+    invoice,
+  });
 
   try {
     const api = apiFor(integration);
     await withTelegramRetry(() =>
-      api.sendDocument(Number(buyer.telegramId), new InputFile(buffer, fileName), {
-        caption: `✅ *Pembayaran Diterima\\!*\n\nPesanan kamu sudah selesai diproses\\. Silakan unduh file pesanan kamu di bawah ini\\.\n\nTerima kasih sudah berbelanja\\!`,
-        parse_mode: 'MarkdownV2',
-      }),
+      api.sendDocument(Number(buyer.telegramId), new InputFile(buffer, fileName), { caption }),
     );
   } catch (err) {
     logger.error({ err, orderId: order.id, integrationId: integration.id }, 'Failed to deliver order items');
@@ -89,15 +186,14 @@ export async function deliverOrder(integration: Integration, order: Order): Prom
 export async function notifyManualPending(integration: Integration, order: Order): Promise<void> {
   const buyer = await prisma.buyer.findUnique({ where: { id: order.buyerId } });
   if (!buyer) return;
-  const code = (order.invoiceCode ?? order.externalReference).replace(/[`\\]/g, '\\$&');
+  const code = order.invoiceCode ?? order.externalReference;
 
   try {
     const api = apiFor(integration);
     await withTelegramRetry(() =>
       api.sendMessage(
         Number(buyer.telegramId),
-        `✅ Pembayaran kamu sudah diterima\\!\n\n⏳ Item sedang dalam proses verifikasi manual\\. Kami akan segera mengirimkannya\\. Gunakan /cek \`${code}\` untuk cek status\\. Terima kasih atas kesabarannya\\!`,
-        { parse_mode: 'MarkdownV2' },
+        `✅ Pembayaran kamu sudah diterima!\n\n⏳ Item sedang dalam proses verifikasi manual. Kami akan segera mengirimkannya. Gunakan /cek ${code} untuk cek status. Terima kasih atas kesabarannya!`,
       ),
     );
   } catch (err) {

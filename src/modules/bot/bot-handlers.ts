@@ -5,6 +5,7 @@ import { prisma } from '../../lib/prisma.js';
 import { createHash } from 'node:crypto';
 import { decrypt, generateToken } from '../../lib/crypto.js';
 import { fetchProducts, createQrisOrder, AutoStoreError } from '../autostore/autostore-client.js';
+import { invoiceClosedNotice } from '../orders/delivery.service.js';
 import { logger } from '../../lib/logger.js';
 import { env } from '../../config/env.js';
 import type { AutoStoreProduct } from '../autostore/autostore-client.js';
@@ -499,16 +500,27 @@ export function setupBotHandlers(bot: Bot, initialIntegration: Integration): voi
       }
 
       const invoiceKeyboard = cancelKeyboard(order.id);
+      let invoiceMessageId: number | undefined;
       if (qrisResp.qrImageUrl) {
-        // Change the current message to indicate invoice was sent, then send the photo
-        await ctx.editMessageText('✅ Invoice berhasil dibuat\\!\nSilakan cek pesan terbaru\\.', { parse_mode: 'MarkdownV2' });
-        await ctx.replyWithPhoto(qrisResp.qrImageUrl, { caption: message, parse_mode: 'MarkdownV2', reply_markup: invoiceKeyboard });
-      } else if (qrisResp.paymentUrl) {
-        // Fallback to sending the payment link if there's no image
-        message += `\n\n🔗 [Bayar di sini](${qrisResp.paymentUrl})`;
-        await ctx.editMessageText(message, { parse_mode: 'MarkdownV2', link_preview_options: { is_disabled: true }, reply_markup: invoiceKeyboard });
+        // Replace the quantity picker with the QR photo
+        await ctx.deleteMessage().catch(() => {});
+        const sent = await ctx.replyWithPhoto(qrisResp.qrImageUrl, { caption: message, parse_mode: 'MarkdownV2', reply_markup: invoiceKeyboard });
+        invoiceMessageId = sent.message_id;
       } else {
-        await ctx.editMessageText(message, { parse_mode: 'MarkdownV2', reply_markup: invoiceKeyboard });
+        if (qrisResp.paymentUrl) {
+          // Fallback to sending the payment link if there's no image
+          message += `\n\n🔗 [Bayar di sini](${qrisResp.paymentUrl})`;
+        }
+        await ctx.editMessageText(message, { parse_mode: 'MarkdownV2', link_preview_options: { is_disabled: true }, reply_markup: invoiceKeyboard });
+        invoiceMessageId = ctx.callbackQuery.message?.message_id;
+      }
+
+      // Remember where the QR lives so it can be removed once the invoice closes
+      if (invoiceMessageId && ctx.chat) {
+        await prisma.order.update({
+          where: { id: order.id },
+          data: { invoiceChatId: BigInt(ctx.chat.id), invoiceMessageId },
+        });
       }
     } catch (err) {
       logger.error({ err, integrationId: integration.id }, 'Error creating QRIS order');
@@ -578,13 +590,14 @@ export function setupBotHandlers(bot: Bot, initialIntegration: Integration): voi
       logger.info({ orderId, integrationId: integration.id }, 'Order cancelled by buyer');
       await ctx.answerCallbackQuery('Pembayaran dibatalkan.');
 
-      const text = '❌ *Pembayaran dibatalkan*\n\nInvoice ini sudah tidak berlaku\. Jangan lakukan pembayaran untuk invoice ini\.';
-      const reply_markup = new IK().text('🛍️ Belanja Lagi', 'shop_again');
-      if (ctx.callbackQuery.message && 'photo' in ctx.callbackQuery.message && ctx.callbackQuery.message.photo) {
-        await ctx.editMessageCaption({ caption: text, parse_mode: 'MarkdownV2', reply_markup });
-      } else {
-        await ctx.editMessageText(text, { parse_mode: 'MarkdownV2', reply_markup });
-      }
+      // Remove the QR so it can't be paid by mistake, then explain why it's gone
+      const cancelled = await prisma.order.findUnique({ where: { id: orderId } });
+      const code = cancelled?.invoiceCode ?? cancelled?.externalReference ?? `#${orderId}`;
+      const deleted = await ctx.deleteMessage().then(() => true, () => false);
+      if (!deleted) await ctx.editMessageReplyMarkup().catch(() => {});
+      await ctx.reply(invoiceClosedNotice('cancelled', code), {
+        reply_markup: new IK().text('🛍️ Belanja Lagi', 'shop_again'),
+      });
     } catch (err) {
       logger.error({ err, orderId, integrationId: integration.id }, 'Error cancelling order');
       await ctx.answerCallbackQuery({ text: '⚠️ Gagal membatalkan. Coba lagi.', show_alert: true }).catch(() => {});

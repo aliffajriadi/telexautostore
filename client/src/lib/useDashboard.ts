@@ -12,6 +12,7 @@ export interface Integration {
   webhookSecret: string;
   startMessage: string | null;
   startImageUrl: string | null;
+  deliveryMessage: string | null;
   lastCallbackAt: string | null;
   lastError: string | null;
 }

@@ -74,6 +74,7 @@ dashboardRouter.get('/', async (req: Request, res: Response) => {
           webhookSecret: decrypt(integration.webhookSecretEnc),
           startMessage: integration.startMessage,
           startImageUrl: integration.startImageUrl,
+          deliveryMessage: integration.deliveryMessage,
           lastCallbackAt: integration.lastCallbackAt,
           lastError: integration.lastError,
         }
@@ -90,6 +91,7 @@ const integrationSchema = z.object({
   apiKey: z.string().optional().or(z.literal('')),
   startMessage: z.string().optional().or(z.literal('')),
   startImageUrl: z.string().optional().or(z.literal('')),
+  deliveryMessage: z.string().max(1000, 'Pesan pengiriman maksimal 1000 karakter.').optional().or(z.literal('')),
 });
 
 dashboardRouter.post('/integration', async (req: Request, res: Response) => {
@@ -100,7 +102,7 @@ dashboardRouter.post('/integration', async (req: Request, res: Response) => {
     return;
   }
 
-  const { botToken, autostoreUrl, apiKey, startMessage, startImageUrl } = parsed.data;
+  const { botToken, autostoreUrl, apiKey, startMessage, startImageUrl, deliveryMessage } = parsed.data;
   // Empty string means "don't change"
   const data = {
     botToken: botToken?.trim() || undefined,
@@ -108,6 +110,7 @@ dashboardRouter.post('/integration', async (req: Request, res: Response) => {
     apiKey: apiKey?.trim() || undefined,
     startMessage: startMessage,
     startImageUrl: startImageUrl,
+    deliveryMessage: deliveryMessage,
   };
 
   try {

@@ -68,6 +68,7 @@ model Integration {
   botActive        Boolean  @default(false)
   startImageUrl    String?  @db.Text
   startMessage     String?  @db.Text
+  deliveryMessage  String?  @db.Text
   lastCallbackAt   DateTime?
   lastError        String?  @db.Text
   createdAt        DateTime @default(now())
@@ -105,6 +106,9 @@ model Order {
   expiresAt         DateTime?
   paidAt            DateTime?
   deliveredAt       DateTime?
+  // Telegram message holding the QR, so it can be removed once the invoice closes
+  invoiceChatId     BigInt?
+  invoiceMessageId  Int?
   createdAt         DateTime    @default(now())
   updatedAt         DateTime    @updatedAt
   integration       Integration @relation(fields: [integrationId], references: [id], onDelete: Cascade)

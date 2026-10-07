@@ -6,6 +6,7 @@ import { useDashboard } from '../../lib/useDashboard';
 import { apiError } from '../../lib/format';
 import { useToast } from '../../contexts/ToastContext';
 import { PageHeader, Card, Field, LoadingBlock, Spinner, EmptyState } from '../../components/ui';
+import { DeliveryMessageCard } from '../../components/DeliveryMessageCard';
 
 // Mirrors the bot's defaults in src/modules/bot/bot-handlers.ts
 const DEFAULT_IMAGE = 'https://images.unsplash.com/photo-1556742049-0cfed4f6a45d?auto=format&fit=crop&w=800&q=80';
@@ -49,7 +50,7 @@ export function AppearancePage() {
     setSaving(true);
     try {
       await api.post('/dashboard/integration', form);
-      toast('success', 'Tampilan bot disimpan.');
+      toast('success', 'Menu start disimpan.');
       await reload();
     } catch (err) {
       toast('error', apiError(err, 'Gagal menyimpan.'));
@@ -63,7 +64,7 @@ export function AppearancePage() {
 
   return (
     <>
-      <PageHeader title="Tampilan Bot" subtitle="Atur banner dan pesan sambutan saat pembeli mengirim /start." />
+      <PageHeader title="Tampilan Bot" subtitle="Atur pesan sambutan /start dan pesan pengiriman barang ke pembeli." />
 
       <div className="grid-main-side">
         <form onSubmit={save}>
@@ -120,6 +121,8 @@ export function AppearancePage() {
           </div>
         </Card>
       </div>
+
+      <DeliveryMessageCard initial={intg.deliveryMessage} onSaved={reload} />
     </>
   );
 }

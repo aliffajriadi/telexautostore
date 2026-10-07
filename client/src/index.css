@@ -599,3 +599,13 @@ tr.clickable { cursor: pointer; }
   .stat-value { font-size: 1.25rem; }
   .page-title { font-size: 1.3rem; }
 }
+
+/* Telegram document bubble (delivery preview) */
+.tg-file { display: flex; align-items: center; gap: 10px; padding: 10px 12px 2px; }
+.tg-file-icon {
+  width: 40px; height: 40px; border-radius: 50%;
+  background: #3a8ee6; color: #fff;
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+}
+.tg-file-name { font-size: 0.8125rem; font-weight: 600; color: #e9eef4; overflow-wrap: anywhere; }
+.tg-file-size { font-size: 0.75rem; color: #7d8b99; }
